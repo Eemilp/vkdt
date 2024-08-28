@@ -99,20 +99,8 @@ wb3cb(mat3 rec2020_picks, vec3 rec2020_src)
       0.2245, 0.05931, 0.09227,
       0.2258, 0.03446, 0.11100,
       0.2230, 0.01470, 0.02473));
-  // const mat3 G = mat3( //In XYZ space
-  //   0.30170450962206746,0.4816105237817958,0.8319341891816767,
-  //   0.07665919885106333,0.06988861538985221,0.04639108371503362,
-  //   0.12256224428202597,0.23688473346293115,0.09991193757476204);
-      // 0.3148628107606773,0.492740293639855,0.8558990620861874, //D50
-      // 0.07954309903091158,0.06505275949790679,0.03751426899031758,
-      // 0.12622215614878998,0.2424333090031561,0.09638971855263291);
-  //   0.285580869943985,0.4307154409737072,0.8589097560820819, //D65
-  //   0.0721456667569241,0.05686408916697354,0.03764622845775084,
-  //   0.11448361612504149,0.2119164414638476,0.0967287771633586);
-  //0.00532349:0.0195308:0.017218:0:0.0190942:0.0184048:0.0144072:0:0.0706271:0.280183:0.0943646:0:0:0:0:0:0:0:0:0:
   mat3 T = rec2020_to_xyz * rec2020_picks;
   mat3 M = G * inverse(T);
-  //return whitebalanced data in RGB
   return inverse(rec2020_to_xyz)*M*rec2020_to_xyz*rec2020_src;
 }
 
@@ -299,8 +287,18 @@ main()
     rgb = decode_colour(rgb);
   else rgb = process_clut(rgb);
 
-  if(push.have_pick == 1 && (params.pick_mode & 1) != 0)
+  if(push.have_pick == 1 && (params.pick_mode==1 || params.pick_mode==4))
   { // spot wb
+    if(params.colour_mode == 0 || push.have_clut == 0){
+      picked_rgb = decode_colour(picked_rgb);
+    }
+    else
+      picked_rgb = process_clut(picked_rgb);
+    picked_rgb /= picked_rgb.g;
+    rgb = cat16(rgb, picked_rgb, params.mul.rgb);
+
+  } else if(params.pick_mode==2)
+  {
     if(params.colour_mode == 0 || push.have_clut == 0){
       picked_rgb = decode_colour(picked_rgb);
       picked_rgb_white = decode_colour(picked_rgb_white);
@@ -308,17 +306,14 @@ main()
       picked_rgb_yellowgreen = decode_colour(picked_rgb_yellowgreen);
     }
     else
+    {
       picked_rgb = process_clut(picked_rgb);
-    picked_rgb /= picked_rgb.g;
-    // rgb = cat16(rgb, picked_rgb, params.mul.rgb);
-
-    // picked_rgb_white /= picked_rgb_white.g;
-    // picked_rgb_red /= picked_rgb_red.g;
-    // picked_rgb_yellowgreen /= picked_rgb_yellowgreen.g;
-
+      picked_rgb_white = process_clut(picked_rgb_white);
+      picked_rgb_red = process_clut(picked_rgb_red);
+      picked_rgb_yellowgreen = process_clut(picked_rgb_yellowgreen);
+    }
     mat3 picked_T = mat3(picked_rgb_white, picked_rgb_red, picked_rgb_yellowgreen);
-    rgb = wb3cb(picked_T, rgb); //experimental whitebalancing
-
+    rgb = wb3cb(picked_T, rgb); //3cb whitebalancing
   } // regular white balancing
   else rgb = cat16(rgb, vec3(1.0), params.mul.rgb);
 
