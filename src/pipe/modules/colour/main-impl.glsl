@@ -86,6 +86,36 @@ cat16(vec3 rec2020_d65, vec3 rec2020_src, vec3 rec2020_dst)
   return inverse(rec2020_to_xyz) * M16i * cl;
 }
 
+vec3
+wb3cb(mat3 rec2020_picks, vec3 rec2020_src)
+{
+  // 3cb 3-point white balance adjustment from
+  // https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8538974/pdf/jimaging-07-00207.pdf
+  const mat3 rec2020_to_xyz = mat3(
+    6.36958048e-01, 2.62700212e-01, 4.20575872e-11,
+    1.44616904e-01, 6.77998072e-01, 2.80726931e-02,
+    1.68880975e-01, 5.93017165e-02, 1.06098506e+00);
+  const mat3 G = transpose(mat3( //In XYZ space
+      0.2245, 0.05931, 0.09227,
+      0.2258, 0.03446, 0.11100,
+      0.2230, 0.01470, 0.02473));
+  // const mat3 G = mat3( //In XYZ space
+  //   0.30170450962206746,0.4816105237817958,0.8319341891816767,
+  //   0.07665919885106333,0.06988861538985221,0.04639108371503362,
+  //   0.12256224428202597,0.23688473346293115,0.09991193757476204);
+      // 0.3148628107606773,0.492740293639855,0.8558990620861874, //D50
+      // 0.07954309903091158,0.06505275949790679,0.03751426899031758,
+      // 0.12622215614878998,0.2424333090031561,0.09638971855263291);
+  //   0.285580869943985,0.4307154409737072,0.8589097560820819, //D65
+  //   0.0721456667569241,0.05686408916697354,0.03764622845775084,
+  //   0.11448361612504149,0.2119164414638476,0.0967287771633586);
+  //0.00532349:0.0195308:0.017218:0:0.0190942:0.0184048:0.0144072:0:0.0706271:0.280183:0.0943646:0:0:0:0:0:0:0:0:0:
+  mat3 T = rec2020_to_xyz * rec2020_picks;
+  mat3 M = G * inverse(T);
+  //return whitebalanced data in RGB
+  return inverse(rec2020_to_xyz)*M*rec2020_to_xyz*rec2020_src;
+}
+
 
 float
 kernel(vec3 ci, vec3 p)
@@ -214,6 +244,9 @@ main()
   vec3 rgb = texelFetch(img_in, ipos, 0).rgb; // read camera rgb
   float cam_lum = 1.5;
   vec3 picked_rgb = vec3(0.5);
+  vec3 picked_rgb_white = vec3(0.5);
+  vec3 picked_rgb_red = vec3(0.5);
+  vec3 picked_rgb_yellowgreen = vec3(0.5);
   if(push.have_pick == 1 && params.pick_mode > 0)
   {
     const int i = 0; // which one of the colour pickers
@@ -228,6 +261,37 @@ main()
         texelFetch(img_pick, ivec2(i, 2), 0).r);
 #endif
     cam_lum = dot(vec3(1), picked_rgb);
+
+    picked_rgb_white = vec3(
+#ifdef HAVE_NO_ATOMICS
+        uintBitsToFloat(texelFetch(img_pick, ivec2(0, 0), 0).r),
+        uintBitsToFloat(texelFetch(img_pick, ivec2(0, 1), 0).r),
+        uintBitsToFloat(texelFetch(img_pick, ivec2(0, 2), 0).r));
+#else
+        texelFetch(img_pick, ivec2(0, 0), 0).r,
+        texelFetch(img_pick, ivec2(0, 1), 0).r,
+        texelFetch(img_pick, ivec2(0, 2), 0).r);
+#endif
+    picked_rgb_red = vec3(
+#ifdef HAVE_NO_ATOMICS
+        uintBitsToFloat(texelFetch(img_pick, ivec2(1, 0), 0).r),
+        uintBitsToFloat(texelFetch(img_pick, ivec2(1, 1), 0).r),
+        uintBitsToFloat(texelFetch(img_pick, ivec2(1, 2), 0).r));
+#else
+        texelFetch(img_pick, ivec2(1, 0), 0).r,
+        texelFetch(img_pick, ivec2(1, 1), 0).r,
+        texelFetch(img_pick, ivec2(1, 2), 0).r);
+#endif
+    picked_rgb_yellowgreen = vec3(
+#ifdef HAVE_NO_ATOMICS
+        uintBitsToFloat(texelFetch(img_pick, ivec2(2, 0), 0).r),
+        uintBitsToFloat(texelFetch(img_pick, ivec2(2, 1), 0).r),
+        uintBitsToFloat(texelFetch(img_pick, ivec2(2, 2), 0).r));
+#else
+        texelFetch(img_pick, ivec2(2, 0), 0).r,
+        texelFetch(img_pick, ivec2(2, 1), 0).r,
+        texelFetch(img_pick, ivec2(2, 2), 0).r);
+#endif
   }
 
   // process camera rgb to rec2020:
@@ -237,12 +301,24 @@ main()
 
   if(push.have_pick == 1 && (params.pick_mode & 1) != 0)
   { // spot wb
-    if(params.colour_mode == 0 || push.have_clut == 0)
+    if(params.colour_mode == 0 || push.have_clut == 0){
       picked_rgb = decode_colour(picked_rgb);
+      picked_rgb_white = decode_colour(picked_rgb_white);
+      picked_rgb_red = decode_colour(picked_rgb_red);
+      picked_rgb_yellowgreen = decode_colour(picked_rgb_yellowgreen);
+    }
     else
       picked_rgb = process_clut(picked_rgb);
     picked_rgb /= picked_rgb.g;
-    rgb = cat16(rgb, picked_rgb, params.mul.rgb);
+    // rgb = cat16(rgb, picked_rgb, params.mul.rgb);
+
+    // picked_rgb_white /= picked_rgb_white.g;
+    // picked_rgb_red /= picked_rgb_red.g;
+    // picked_rgb_yellowgreen /= picked_rgb_yellowgreen.g;
+
+    mat3 picked_T = mat3(picked_rgb_white, picked_rgb_red, picked_rgb_yellowgreen);
+    rgb = wb3cb(picked_T, rgb); //experimental whitebalancing
+
   } // regular white balancing
   else rgb = cat16(rgb, vec3(1.0), params.mul.rgb);
 
