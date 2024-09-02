@@ -529,6 +529,7 @@ void render_lighttable_right_panel()
     nk_tree_pop(ctx);
   }
 
+  int update_collection = 0;
   if(nk_tree_push(ctx, NK_TREE_TAB, "collect", NK_MINIMIZED))
   {
     int32_t filter_prop = vkdt.db.collection_filter;
@@ -540,8 +541,7 @@ void render_lighttable_right_panel()
     if(res != sort_prop)
     {
       vkdt.db.collection_sort = sort_prop = res;
-      dt_db_update_collection(&vkdt.db);
-      dt_thumbnails_cache_collection(&vkdt.thumbnail_gen, &vkdt.db, &glfwPostEmptyEvent);
+      update_collection = 1;
     }
     nk_label(&vkdt.ctx, "sort", NK_TEXT_LEFT);
 
@@ -549,12 +549,12 @@ void render_lighttable_right_panel()
     if(res != filter_prop)
     {
       vkdt.db.collection_filter = filter_prop = res;
-      dt_db_update_collection(&vkdt.db);
-      dt_thumbnails_cache_collection(&vkdt.thumbnail_gen, &vkdt.db, &glfwPostEmptyEvent);
+      vkdt.db.collection_filter_val = 0;
+      update_collection = 1;
     }
     nk_label(ctx, "filter", NK_TEXT_LEFT);
 
-    int filter_val = vkdt.db.collection_filter_val;
+    uint64_t filter_val = vkdt.db.collection_filter_val;
     if(filter_prop == s_prop_labels)
     {
       const struct nk_color col[] = {
@@ -580,8 +580,7 @@ void render_lighttable_right_panel()
         {
           filter_val ^= (1<<k);
           vkdt.db.collection_filter_val = filter_val;
-          dt_db_update_collection(&vkdt.db);
-          dt_thumbnails_cache_collection(&vkdt.thumbnail_gen, &vkdt.db, &glfwPostEmptyEvent);
+          update_collection = 1;
         }
         nk_style_pop_float(ctx);
         if(sel) nk_style_pop_float(ctx);
@@ -614,16 +613,26 @@ void render_lighttable_right_panel()
       {
         filter_module_idx = res;
         vkdt.db.collection_filter_val = input_modules[res];
-        dt_db_update_collection(&vkdt.db);
-        dt_thumbnails_cache_collection(&vkdt.thumbnail_gen, &vkdt.db, &glfwPostEmptyEvent);
+        update_collection = 1;
       }
       nk_label(ctx, "file type", NK_TEXT_LEFT);
     }
     else if(filter_prop == s_prop_none)
     { // hide filter value, it's meaningless
     }
-    else if(filter_prop == s_prop_filename)   {} // TODO wire these in the db.c backend!
-    else if(filter_prop == s_prop_createdate) {} // TODO probably want to support longer filter strings too.
+    else if(filter_prop == s_prop_filename)   {} // TODO wire this in the db.c backend!
+    else if(filter_prop == s_prop_createdate)
+    {
+      static dt_token_t typed_filter_val = 666;
+      if(typed_filter_val == 666) typed_filter_val = vkdt.db.collection_filter_val;
+      dt_tooltip("substring to match in the createdate\nin YYYY:MM:DD HH:MM:SS form");
+      nk_flags ret = nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD|NK_EDIT_SIG_ENTER, dt_token_str(typed_filter_val), 8, nk_filter_default);
+      if(ret & NK_EDIT_COMMITED)
+      {
+        vkdt.db.collection_filter_val = typed_filter_val;
+        update_collection = 1;
+      }
+    }
     else if(filter_prop == s_prop_rating)
     {
       nk_layout_row(ctx, NK_STATIC, row_height, 2, ratio);
@@ -632,8 +641,7 @@ void render_lighttable_right_panel()
       if(resi != filter_val) 
       {
         vkdt.db.collection_filter_val = filter_val = resi;
-        dt_db_update_collection(&vkdt.db);
-        dt_thumbnails_cache_collection(&vkdt.thumbnail_gen, &vkdt.db, &glfwPostEmptyEvent);
+        update_collection = 1;
       }
       nk_label(ctx, "filter value", NK_TEXT_LEFT);
     }
@@ -644,6 +652,12 @@ void render_lighttable_right_panel()
       dt_view_switch(s_view_files);
 
     nk_tree_pop(ctx);
+  }
+  if(update_collection)
+  {
+    dt_db_update_collection(&vkdt.db);
+    dt_thumbnails_cache_collection(&vkdt.thumbnail_gen, &vkdt.db, &glfwPostEmptyEvent);
+    dt_gui_update_recently_used_collections();
   }
 
   if(nk_tree_push(ctx, NK_TREE_TAB, "tags", NK_MINIMIZED))

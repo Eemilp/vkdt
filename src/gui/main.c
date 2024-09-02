@@ -38,7 +38,7 @@ get_current_monitor(GLFWwindow *window)
 
   int wx, wy, ww, wh;
   glfwGetWindowPos(window, &wx, &wy);
-  glfwGetWindowSize(window, &ww, &wh);
+  glfwGetFramebufferSize(window, &ww, &wh);
   int nmonitors;
   GLFWmonitor **monitors = glfwGetMonitors(&nmonitors);
 
@@ -283,7 +283,11 @@ int main(int argc, char *argv[])
   {
     char defpath[1024];
     const char *mru = dt_rc_get(&vkdt.rc, "gui/ruc_entry00", "null");
-    if(strcmp(mru, "null")) snprintf(defpath, sizeof(defpath), "%s", mru);
+    if(strcmp(mru, "null"))
+    {
+      snprintf(defpath, sizeof(defpath), "%s", mru);
+      for(int i=0;i<sizeof(defpath) && defpath[i];i++) if(defpath[i] == '&') { defpath[i] = 0; break; }
+    }
     else fs_picturesdir(defpath, sizeof(defpath));
     if(argc > lastarg+1) filename = fs_realpath(argv[lastarg+1], 0);
     else                 filename = fs_realpath(defpath, 0);
@@ -335,12 +339,12 @@ int main(int argc, char *argv[])
     if(frame_limiter || (dt_log_global.mask & s_log_perf))
     { // artificially limit frames rate to frame_limiter milliseconds/frame as minimum.
       double end_rf = dt_time();
-      dt_log(s_log_perf, "fps %.2g", 1.0/(end_rf - beg_rf));
       if(frame_limiter && end_rf - beg_rf < frame_limiter / 1000.0)
       {
         usleep(frame_limiter * 1000);
         continue;
       }
+      dt_log(s_log_perf, "fps %.2g", 1.0/(end_rf - beg_rf));
       beg_rf = end_rf;
     }
 

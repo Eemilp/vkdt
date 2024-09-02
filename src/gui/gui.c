@@ -15,6 +15,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <inttypes.h>
 
 static void
 style_to_state()
@@ -35,6 +36,7 @@ style_to_state()
 int dt_gui_init()
 {
   memset(&vkdt, 0, sizeof(vkdt));
+  vkdt.graph_res = -1;
   if(!glfwInit())
   {
     const char* description;
@@ -199,7 +201,7 @@ dt_gui_recreate_swapchain()
     vkDestroyFramebuffer(qvk.device, vkdt.framebuffer[i], 0);
   if(vkdt.render_pass)
     vkDestroyRenderPass(qvk.device, vkdt.render_pass, 0);
-  glfwGetWindowSize(qvk.window, &qvk.win_width, &qvk.win_height);
+  glfwGetFramebufferSize(qvk.window, &qvk.win_width, &qvk.win_height);
   style_to_state();
   QVKR(qvk_create_swapchain());
 
@@ -315,10 +317,7 @@ VkResult dt_gui_render()
   // timeout is in nanoseconds (these are ~2sec)
   VkResult res = vkAcquireNextImageKHR(qvk.device, qvk.swap_chain, 2ul<<30, image_acquired_semaphore, VK_NULL_HANDLE, &vkdt.frame_index);
   if(res != VK_SUCCESS)
-  {
-    // XXX kill all semaphores
     return res;
-  }
   
   const int i = vkdt.frame_index;
   QVKR(vkWaitForFences(qvk.device, 1, vkdt.fence+i, VK_TRUE, UINT64_MAX));    // wait indefinitely instead of periodically checking
@@ -344,23 +343,40 @@ VkResult dt_gui_render()
   dt_gui_render_frame_nk();
   nk_glfw3_create_cmd(&vkdt.ctx, vkdt.command_buffer[i], NK_ANTI_ALIASING_ON, i);
 
-  // Submit command buffer
+  // submit command buffer
   vkCmdEndRenderPass(vkdt.command_buffer[i]);
-  VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-  VkSubmitInfo sub_info = {
+  const int len = vkdt.graph_res == VK_SUCCESS ? 2 : 1;
+  VkPipelineStageFlags wait_stage[] = { 
+    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, };
+  if(len > 1) // we are adding one more command list reading the current double buf
+    vkdt.graph_dev.display_dbuffer[vkdt.graph_dev.double_buffer] = MAX(vkdt.graph_dev.display_dbuffer[0], vkdt.graph_dev.display_dbuffer[1]) + 1;
+  uint64_t value_wait  [] = { 0, vkdt.graph_dev.process_dbuffer[vkdt.graph_dev.double_buffer] };
+  uint64_t value_signal[] = { 0, vkdt.graph_dev.display_dbuffer[vkdt.graph_dev.double_buffer] };
+  VkTimelineSemaphoreSubmitInfo timeline_info = {
+    .sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+    .waitSemaphoreValueCount   = len,
+    .pWaitSemaphoreValues      = value_wait,
+    .signalSemaphoreValueCount = len,
+    .pSignalSemaphoreValues    = value_signal,
+  };
+  VkSemaphore sem_wait  [] = { image_acquired_semaphore,  vkdt.graph_dev.semaphore_process };
+  VkSemaphore sem_signal[] = { render_complete_semaphore, vkdt.graph_dev.semaphore_display };
+  VkSubmitInfo submit = {
     .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-    .waitSemaphoreCount   = 1,
-    .pWaitSemaphores      = &image_acquired_semaphore,
-    .pWaitDstStageMask    = &wait_stage,
+    .pNext                = &timeline_info,
+    .waitSemaphoreCount   = len,
+    .pWaitSemaphores      = sem_wait,
+    .pWaitDstStageMask    = wait_stage,
     .commandBufferCount   = 1,
     .pCommandBuffers      = vkdt.command_buffer+i,
-    .signalSemaphoreCount = 1,
-    .pSignalSemaphores    = &render_complete_semaphore,
+    .signalSemaphoreCount = len,
+    .pSignalSemaphores    = sem_signal,
   };
 
   QVKR(vkEndCommandBuffer(vkdt.command_buffer[i]));
   QVKLR(&qvk.queue[qvk.qid[s_queue_graphics]].mutex,
-      vkQueueSubmit(qvk.queue[qvk.qid[s_queue_graphics]].queue, 1, &sub_info, vkdt.fence[i]));
+      vkQueueSubmit(qvk.queue[qvk.qid[s_queue_graphics]].queue, 1, &submit, vkdt.fence[i]));
   return res;
 }
 
@@ -474,8 +490,52 @@ dt_gui_read_tags()
   qsort(vkdt.tag, vkdt.tag_cnt, sizeof(vkdt.tag[0]), (int(*)(const void*,const void*))strcmp);
 }
 
+void dt_gui_update_recently_used_collections()
+{
+  int32_t num = CLAMP(dt_rc_get_int(&vkdt.rc, "gui/ruc_num", 0), 0, 10);
+  char entry[512], saved[2][1018], collstr[512];
+  int32_t j=0;
+  // instead of vkdt.db.dirname use a new string that has &filter:value appended, except if filter is 0
+  const char *filter_name[] = {"none", "filename", "rating", "label", "create date", "file type"};
+  if(vkdt.db.collection_filter == s_prop_none)
+  {
+    snprintf(collstr, sizeof(collstr), "%s&all", vkdt.db.dirname);
+  }
+  else if(vkdt.db.collection_filter == s_prop_rating ||
+          vkdt.db.collection_filter == s_prop_labels)
+  {
+    snprintf(collstr, sizeof(collstr), "%s&%s:%"PRIu64, vkdt.db.dirname, filter_name[vkdt.db.collection_filter], vkdt.db.collection_filter_val);
+  }
+  else if(vkdt.db.collection_filter == s_prop_filename ||
+          vkdt.db.collection_filter == s_prop_createdate ||
+          vkdt.db.collection_filter == s_prop_filetype)
+  {
+    snprintf(collstr, sizeof(collstr), "%s&%s:%"PRItkn, vkdt.db.dirname, filter_name[vkdt.db.collection_filter], dt_token_str(vkdt.db.collection_filter_val));
+  }
+  snprintf(saved[1], sizeof(saved[1]), "%s", collstr);
+  for(int32_t i=0;i<=num;i++)
+  { // compact the list by deleting all duplicate entries
+    snprintf(entry, sizeof(entry), "gui/ruc_entry%02d", i);
+    const char *read_dir = i == num ? 0 : dt_rc_get(&vkdt.rc, entry, "null");
+    if(read_dir && strcmp(read_dir, collstr)) snprintf(saved[i&1], sizeof(saved[i&1]), "%s", read_dir); // take a copy
+    else saved[i&1][0] = 0;
+    snprintf(entry, sizeof(entry), "gui/ruc_entry%02d", j);
+    if(saved[(i+1)&1][0]) { dt_rc_set(&vkdt.rc, entry, saved[(i+1)&1]); j++; }
+    saved[(i+1)&1][0] = 0;
+  }
+  dt_rc_set_int(&vkdt.rc, "gui/ruc_num", MIN(j, 10));
+}
+
 void dt_gui_switch_collection(const char *dir)
 {
+  char *end = 0;
+  if(dir)
+  { // find '&' in dir and replace by '\0', remember the position
+    const int len = strlen(dir);
+    for(int i=0;i<len;i++) if(dir[i] == '&') { end = (char *)(dir + i); break; }
+    if(end) *end = 0;
+  }
+
   vkdt.wstate.copied_imgid = -1u; // invalidate
   dt_thumbnails_cache_abort(&vkdt.thumbnail_gen); // this is essential since threads depend on db
   dt_db_cleanup(&vkdt.db);
@@ -484,22 +544,41 @@ void dt_gui_switch_collection(const char *dir)
   dt_db_load_directory(&vkdt.db, &vkdt.thumbnails, dir);
   dt_thumbnails_cache_collection(&vkdt.thumbnail_gen, &vkdt.db, &glfwPostEmptyEvent);
 
-  // update recently used collection list:
-  int32_t num = CLAMP(dt_rc_get_int(&vkdt.rc, "gui/ruc_num", 0), 0, 10);
-  char entry[512], saved[2][1018];
-  int32_t j=0;
-  snprintf(saved[1], sizeof(saved[1]), "%s", vkdt.db.dirname);
-  for(int32_t i=0;i<=num;i++)
-  { // compact the list by deleting all duplicate entries
-    snprintf(entry, sizeof(entry), "gui/ruc_entry%02d", i);
-    const char *read_dir = i == num ? 0 : dt_rc_get(&vkdt.rc, entry, "null");
-    if(read_dir && strcmp(read_dir, vkdt.db.dirname)) snprintf(saved[i&1], sizeof(saved[i&1]), "%s", read_dir); // take a copy
-    else saved[i&1][0] = 0;
-    snprintf(entry, sizeof(entry), "gui/ruc_entry%02d", j);
-    if(saved[(i+1)&1][0]) { dt_rc_set(&vkdt.rc, entry, saved[(i+1)&1]); j++; }
-    saved[(i+1)&1][0] = 0;
+  if(end)
+  { // now set db filter based on stuff we parse behind &
+    *end = '&'; // restore & (because the string was const, right..?)
+    end++;
+    char filter[20] = {0};
+    sscanf(end, "%[^:]", filter);
+    if(!strcmp(filter, "all"))         vkdt.db.collection_filter = s_prop_none;
+    if(!strcmp(filter, "filename"))    vkdt.db.collection_filter = s_prop_filename;
+    if(!strcmp(filter, "rating"))      vkdt.db.collection_filter = s_prop_rating;
+    if(!strcmp(filter, "label"))       vkdt.db.collection_filter = s_prop_labels;
+    if(!strcmp(filter, "create date")) vkdt.db.collection_filter = s_prop_createdate;
+    if(!strcmp(filter, "file type"))   vkdt.db.collection_filter = s_prop_filetype;
+    end += strlen(filter);
+    if(end[0] == ':' && end[1] != 0)
+    {
+      uint64_t num = 0;
+      end++;
+      if(vkdt.db.collection_filter == s_prop_rating ||
+         vkdt.db.collection_filter == s_prop_labels)
+      {
+        sscanf(end, "%"PRIu64, &num);
+      }
+      else if(vkdt.db.collection_filter == s_prop_filename ||
+              vkdt.db.collection_filter == s_prop_createdate ||
+              vkdt.db.collection_filter == s_prop_filetype)
+      {
+        char inp[10] = {0};
+        sscanf(end, "%8s", inp);
+        num = dt_token(inp);
+      }
+      vkdt.db.collection_filter_val = num;
+    }
+    dt_db_update_collection(&vkdt.db);
   }
-  dt_rc_set_int(&vkdt.rc, "gui/ruc_num", MIN(j, 10));
+  dt_gui_update_recently_used_collections();
 }
 
 void dt_gui_notification(const char *msg, ...)
