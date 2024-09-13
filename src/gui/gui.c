@@ -22,11 +22,11 @@ style_to_state()
 {
   const float pwd = vkdt.style.panel_width_frac * (16.0/9.0) * qvk.win_height;
   vkdt.state = (dt_gui_state_t) {
-    .center_x = vkdt.style.border_frac * qvk.win_width,
-    .center_y = vkdt.style.border_frac * qvk.win_width,
+    .center_x = vkdt.style.border_frac * qvk.win_height,
+    .center_y = vkdt.style.border_frac * qvk.win_height,
     .panel_wd = pwd,
-    .center_wd = qvk.win_width * (1.0f-2.0f*vkdt.style.border_frac) - pwd,
-    .center_ht = qvk.win_height - 2*vkdt.style.border_frac * qvk.win_width,
+    .center_wd = qvk.win_width  - 2.0f*vkdt.style.border_frac * qvk.win_height - pwd,
+    .center_ht = qvk.win_height * (1.0f-2.0f*vkdt.style.border_frac),
     .panel_ht = qvk.win_height,
     .anim_frame = vkdt.state.anim_frame,
     .anim_max_frame = vkdt.state.anim_max_frame,
@@ -62,8 +62,10 @@ int dt_gui_init()
   vkdt.wstate.copied_imgid = -1u; // none copied at startup
   threads_mutex_init(&vkdt.wstate.notification_mutex, 0);
 
+  const float dpi_scale = dt_rc_get_float(&vkdt.rc, "gui/dpiscale", 1.0f);
+  float rel_fontsize = 2.0f / 55.0f * dpi_scale;
   vkdt.style.panel_width_frac = 0.2f;
-  vkdt.style.border_frac = 0.02f;
+  vkdt.style.border_frac = rel_fontsize * 1.05f; // large enough to fit 2x fontsize heading
   GLFWmonitor* monitor = glfwGetPrimaryMonitor();
   const GLFWvidmode* mode = glfwGetVideoMode(monitor);
   // start "full screen"
@@ -496,21 +498,40 @@ void dt_gui_update_recently_used_collections()
   char entry[512], saved[2][1018], collstr[512];
   int32_t j=0;
   // instead of vkdt.db.dirname use a new string that has &filter:value appended, except if filter is 0
-  const char *filter_name[] = {"none", "filename", "rating", "label", "create date", "file type"};
-  if(vkdt.db.collection_filter == s_prop_none)
+  char *c = collstr;
+  size_t len = sizeof(collstr);
+  int off = snprintf(c, len, "%s", vkdt.db.dirname);
+  c += off; len -= off;
+  dt_db_filter_t *ft = &vkdt.db.collection_filter;
+  if(len > 0 && !ft->active)
   {
-    snprintf(collstr, sizeof(collstr), "%s&all", vkdt.db.dirname);
+    off = snprintf(c, len, "&all");
+    c += off; len -= off;
   }
-  else if(vkdt.db.collection_filter == s_prop_rating ||
-          vkdt.db.collection_filter == s_prop_labels)
+  if(len > 0 && (ft->active & (1<<s_prop_filename)))
   {
-    snprintf(collstr, sizeof(collstr), "%s&%s:%"PRIu64, vkdt.db.dirname, filter_name[vkdt.db.collection_filter], vkdt.db.collection_filter_val);
+    off = snprintf(c, len, "&filename:%s", ft->filename);
+    c += off; len -= off;
   }
-  else if(vkdt.db.collection_filter == s_prop_filename ||
-          vkdt.db.collection_filter == s_prop_createdate ||
-          vkdt.db.collection_filter == s_prop_filetype)
+  if(len > 0 && (ft->active & (1<<s_prop_rating)))
   {
-    snprintf(collstr, sizeof(collstr), "%s&%s:%"PRItkn, vkdt.db.dirname, filter_name[vkdt.db.collection_filter], dt_token_str(vkdt.db.collection_filter_val));
+    off = snprintf(c, len, "&rating:%u", ft->rating);
+    c += off; len -= off;
+  }
+  if(len > 0 && (ft->active & (1<<s_prop_labels)))
+  {
+    off = snprintf(c, len, "&labels:%u", ft->labels);
+    c += off; len -= off;
+  }
+  if(len > 0 && (ft->active & (1<<s_prop_createdate)))
+  {
+    off = snprintf(c, len, "&createdate:%s", ft->createdate);
+    c += off; len -= off;
+  }
+  if(len > 0 && (ft->active & (1<<s_prop_filetype)))
+  {
+    off = snprintf(c, len, "&filetype:%s", dt_token_str(ft->filetype));
+    c += off; len -= off;
   }
   snprintf(saved[1], sizeof(saved[1]), "%s", collstr);
   for(int32_t i=0;i<=num;i++)
@@ -547,34 +568,21 @@ void dt_gui_switch_collection(const char *dir)
   if(end)
   { // now set db filter based on stuff we parse behind &
     *end = '&'; // restore & (because the string was const, right..?)
-    end++;
-    char filter[20] = {0};
-    sscanf(end, "%[^:]", filter);
-    if(!strcmp(filter, "all"))         vkdt.db.collection_filter = s_prop_none;
-    if(!strcmp(filter, "filename"))    vkdt.db.collection_filter = s_prop_filename;
-    if(!strcmp(filter, "rating"))      vkdt.db.collection_filter = s_prop_rating;
-    if(!strcmp(filter, "label"))       vkdt.db.collection_filter = s_prop_labels;
-    if(!strcmp(filter, "create date")) vkdt.db.collection_filter = s_prop_createdate;
-    if(!strcmp(filter, "file type"))   vkdt.db.collection_filter = s_prop_filetype;
-    end += strlen(filter);
-    if(end[0] == ':' && end[1] != 0)
+    dt_db_filter_t *ft = &vkdt.db.collection_filter;
+    ft->active = 0;
+    for(int i=0;i<s_prop_cnt;i++)
     {
-      uint64_t num = 0;
       end++;
-      if(vkdt.db.collection_filter == s_prop_rating ||
-         vkdt.db.collection_filter == s_prop_labels)
-      {
-        sscanf(end, "%"PRIu64, &num);
-      }
-      else if(vkdt.db.collection_filter == s_prop_filename ||
-              vkdt.db.collection_filter == s_prop_createdate ||
-              vkdt.db.collection_filter == s_prop_filetype)
-      {
-        char inp[10] = {0};
-        sscanf(end, "%8s", inp);
-        num = dt_token(inp);
-      }
-      vkdt.db.collection_filter_val = num;
+      char filter[20] = {0}, val[30] = {0};
+      sscanf(end, "%[^:]:%[^&]", filter, val);
+      if(!strcmp(filter, "all"))         ft->active = s_prop_none;
+      if(!strcmp(filter, "filename"))    { ft->active |= 1<<s_prop_filename;   snprintf(ft->filename, sizeof(ft->filename), "%s", val); }
+      if(!strcmp(filter, "rating"))      { ft->active |= 1<<s_prop_rating;     ft->rating = atol(val); }
+      if(!strcmp(filter, "labels"))      { ft->active |= 1<<s_prop_labels;     ft->labels = atol(val); }
+      if(!strcmp(filter, "createdate"))  { ft->active |= 1<<s_prop_createdate; snprintf(ft->createdate, sizeof(ft->createdate), "%s", val); }
+      if(!strcmp(filter, "filetype"))    { ft->active |= 1<<s_prop_filetype;   snprintf(dt_token_str(ft->filetype), 8, "%.8s", val); }
+      while(*end != '&' && *end != 0) end++;
+      if(*end == 0) break;
     }
     dt_db_update_collection(&vkdt.db);
   }

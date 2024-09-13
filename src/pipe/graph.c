@@ -551,8 +551,6 @@ void dt_graph_reset(dt_graph_t *g)
   g->lod_scale = 0;
   g->runflags = 0;
   g->frame = 0;
-  g->output_wd = 0;
-  g->output_ht = 0;
   g->thumbnail_image = 0;
   g->query[0].cnt = g->query[1].cnt = 0;
   g->params_end = 0;
@@ -583,6 +581,7 @@ void dt_graph_reset(dt_graph_t *g)
         c->array_alloc_size = 0;
         c->array_mem = 0;
       }
+      *c = (dt_connector_t){0};
     }
     vkDestroyPipelineLayout     (qvk.device, g->node[i].pipeline_layout,  0);
     vkDestroyPipeline           (qvk.device, g->node[i].pipeline,         0);

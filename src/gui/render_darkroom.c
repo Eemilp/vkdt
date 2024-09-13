@@ -242,15 +242,17 @@ void dt_gui_set_lod(int lod)
 {
   // set graph output scale factor and
   // trigger complete pipeline rebuild
+  const int mid = dt_module_get(&vkdt.graph_dev, dt_token("display"), dt_token("main"));
+  if(mid < 0) return;
   if(lod > 1)
   {
-    vkdt.graph_dev.output_wd = vkdt.state.center_wd / (lod-1);
-    vkdt.graph_dev.output_ht = vkdt.state.center_ht / (lod-1);
+    vkdt.graph_dev.module[mid].connector[0].max_wd = vkdt.state.center_wd / (lod-1);
+    vkdt.graph_dev.module[mid].connector[0].max_ht = vkdt.state.center_ht / (lod-1);
   }
   else
   {
-    vkdt.graph_dev.output_wd = 0;
-    vkdt.graph_dev.output_ht = 0;
+    vkdt.graph_dev.module[mid].connector[0].max_wd = 0;
+    vkdt.graph_dev.module[mid].connector[0].max_ht = 0;
   }
   vkdt.graph_dev.runflags = s_graph_run_all;
   // reset view? would need to set zoom, too
@@ -374,7 +376,7 @@ void render_darkroom()
       const uint16_t labels = vkdt.db.image[ci].labels;
       const uint16_t rating = vkdt.db.image[ci].rating;
       dt_draw_rating(win_x+wd,   win_y+wd, wd, rating);
-      dt_draw_labels(win_x+5*wd, win_y+wd, wd, labels);
+      dt_draw_labels(win_x+6*wd, win_y+wd, wd, labels);
     }
 
     // draw context sensitive help overlay

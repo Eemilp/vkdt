@@ -267,6 +267,12 @@ void render_lighttable_center()
   if(g_scroll_offset > 0) 
     vkdt.ctx.current->scrollbar.y = g_scroll_offset;
 
+  if(g_image_cursor == -2)
+  { // set cursor to current image if any:
+    g_image_cursor = dt_db_current_colid(&vkdt.db);
+    if(g_image_cursor == -1) g_image_cursor = -2; // no current image
+  }
+
   nk_style_push_vec2(&vkdt.ctx, &vkdt.ctx.style.window.spacing, nk_vec2(spacing, spacing));
   for(int i=0;i<vkdt.db.collection_cnt;i++)
   {
@@ -408,6 +414,68 @@ void render_lighttable_center()
 }
 
 
+static inline void
+render_lighttable_header()
+{
+  nk_style_push_style_item(&vkdt.ctx, &vkdt.ctx.style.window.fixed_background, nk_style_item_hide());
+  if(nk_begin(&vkdt.ctx, "lighttable header",
+        nk_rect(0, 0, vkdt.state.center_wd, vkdt.state.center_y),
+        NK_WINDOW_NO_SCROLLBAR))
+  { // draw current collection description
+    char str[100];
+    int len = sizeof(str);
+    const char *last = vkdt.db.dirname;
+    for(const char *c=last;*c!=0;c++) if(*c=='/') last = c+1;
+    char date[10] = {0}, desc[100];
+    sscanf(last, "%8s_%99s", date, desc);
+    char *c = str;
+    int off;
+    if(isdigit(date[0]) && isdigit(date[1]) && isdigit(date[2]) && isdigit(date[3]))
+      off = snprintf(c, len, "%.4s %s", date, desc);
+    else
+      off = snprintf(c, len, "%s", last);
+    c += off; len -= off;
+
+    dt_db_filter_t *ft = &vkdt.db.collection_filter;
+    if(len > 0 && (ft->active & (1<<s_prop_createdate)))
+    {
+      if(!strncmp(date, ft->createdate, 4))
+        off = snprintf(c, len, " %s", ft->createdate+5);
+      else
+        off = snprintf(c, len, " %s", ft->createdate);
+      for(int i=0;c[i];i++) if(c[i] == ':') c[i] = ' ';
+      c += off; len -= off;
+    }
+    if(len > 0 && (ft->active & (1<<s_prop_filename)))
+    {
+      off = snprintf(c, len, " %s", ft->filename);
+      c += off; len -= off;
+    }
+    if(len > 0 && (ft->active & (1<<s_prop_filetype)))
+    {
+      off = snprintf(c, len, " %"PRItkn, dt_token_str(ft->filetype));
+      c += off; len -= off;
+    }
+    struct nk_command_buffer *buf = nk_window_get_canvas(&vkdt.ctx);
+    const struct nk_rect bounds = {vkdt.state.center_x, 0, vkdt.state.center_x+vkdt.state.center_wd, vkdt.state.center_ht};
+    nk_draw_text(buf, bounds, str, strlen(str), &dt_gui_get_font(2)->handle, nk_rgba(0,0,0,255), vkdt.style.colour[NK_COLOR_TEXT]);
+
+#if 0
+    // TODO: draw circles and stars, make clickable, what do we click if there's nothing yet?
+    if(ft->active & (1<<s_prop_rating))
+    { // draw stars
+    }
+    if(ft->active & (1<<s_prop_labels))
+    { // draw circles
+    }
+#endif
+  }
+  nk_end(&vkdt.ctx);
+  nk_style_pop_style_item(&vkdt.ctx);
+}
+
+
+
 // export bg job stuff. put into api.hh?
 typedef struct export_job_t
 { // this memory belongs to the export thread and will not change behind its back.
@@ -461,10 +529,26 @@ void export_job_work(uint32_t item, void *arg)
   param.output[0].quality    = j->quality;
   param.output[0].mod        = j->output_module;
   param.output[0].p_pdata    = (char *)j->pdata;
-  param.last_frame_only      = j->last_frame_only;
   param.output[0].colour_primaries = j->colour_prim;
   param.output[0].colour_trc       = j->colour_trc;
-  param.p_cfgfile = infilename;
+  param.last_frame_only      = j->last_frame_only;
+  param.p_cfgfile            = infilename;
+  if(j->output_module == dt_token("o-web"))
+  { // if module is o-web, also generate thumbnails at reduced size.
+    param.output_cnt = 2;
+    param.last_frame_only = 1; // avoid small thumbnail per frame in videos
+    snprintf(filedir, sizeof(filedir), "%s-small", filename);
+    param.output[1].p_filename = filedir;
+    param.output[1].max_width  = 400;
+    param.output[1].max_height = 400;
+    param.output[1].quality    = j->quality;
+    param.output[1].inst_out   = dt_token("small");
+    param.output[1].mod        = dt_token("o-jpg");
+    param.output[0].p_pdata    =
+    param.output[1].p_pdata    = 0; // dangerous because the module doesn't match the ui. this will be mostly uninited memory.
+    param.output[1].colour_primaries = j->colour_prim;
+    param.output[1].colour_trc       = j->colour_trc;
+  }
   if(dt_graph_export(&j->graph, &param))
     dt_gui_notification("export %s failed!\n", infilename);
 out:
@@ -532,8 +616,8 @@ void render_lighttable_right_panel()
   int update_collection = 0;
   if(nk_tree_push(ctx, NK_TREE_TAB, "collect", NK_MINIMIZED))
   {
-    int32_t filter_prop = vkdt.db.collection_filter;
-    int32_t sort_prop   = vkdt.db.collection_sort;
+    dt_db_filter_t *ft = &vkdt.db.collection_filter;
+    int32_t sort_prop  =  vkdt.db.collection_sort;
 
     nk_layout_row(ctx, NK_STATIC, row_height, 2, ratio);
 
@@ -545,96 +629,126 @@ void render_lighttable_right_panel()
     }
     nk_label(&vkdt.ctx, "sort", NK_TEXT_LEFT);
 
-    res = nk_combo_string(ctx, dt_db_property_text, filter_prop, 0xffff, row_height, size);
-    if(res != filter_prop)
+    nk_layout_row(ctx, NK_STATIC, row_height, 2, ratio);
+    int resi = ft->active & (1<<s_prop_rating) ? CLAMP(ft->rating, 0, 5) : 0;
+    nk_style_push_font(ctx, &dt_gui_get_font(3)->handle);
+    resi = nk_combo_string(ctx, "\ue836\0\ue838\0\ue838\ue838\0\ue838\ue838\ue838\0\ue838\ue838\ue838\ue838\0\ue838\ue838\ue838\ue838\ue838\0\0", resi, 0xffff, row_height, size);
+
+    nk_style_pop_font(ctx);
+    if(resi != ft->rating) 
     {
-      vkdt.db.collection_filter = filter_prop = res;
-      vkdt.db.collection_filter_val = 0;
+      if(resi == 0) ft->active &= ~(1<<s_prop_rating);
+      else          ft->active |=   1<<s_prop_rating ;
+      ft->rating = resi;
       update_collection = 1;
     }
-    nk_label(ctx, "filter", NK_TEXT_LEFT);
+    dt_tooltip("select the minimum star rating of images in the collection");
+    nk_label(ctx, "rating", NK_TEXT_LEFT);
 
-    uint64_t filter_val = vkdt.db.collection_filter_val;
-    if(filter_prop == s_prop_labels)
+    const struct nk_color col[] = {
+      {0xee, 0x11, 0x11, 0xff},
+      {0x11, 0xee, 0x11, 0xff},
+      {0x11, 0x11, 0xee, 0xff},
+      {0xee, 0xee, 0x11, 0xff},
+      {0xee, 0x11, 0xee, 0xff},
+      {0x07, 0x07, 0x07, 0xff},
+      {0x07, 0x07, 0x07, 0xff}};
+    nk_layout_row_dynamic(ctx, row_height, 7);
+    if(!(ft->active & (1<<s_prop_labels))) ft->labels = 0;
+    for(int k=0;k<7;k++)
     {
-      const struct nk_color col[] = {
-        {0xee, 0x11, 0x11, 0xff},
-        {0x11, 0xee, 0x11, 0xff},
-        {0x11, 0x11, 0xee, 0xff},
-        {0xee, 0xee, 0x11, 0xff},
-        {0xee, 0x11, 0xee, 0xff},
-        {0x07, 0x07, 0x07, 0xff},
-        {0x07, 0x07, 0x07, 0xff}};
-      nk_layout_row_dynamic(ctx, row_height, 7);
-      for(int k=0;k<7;k++)
-      {
-        nk_style_push_style_item(ctx, &ctx->style.button.normal, nk_style_item_color(col[k]));
-        nk_style_push_float(ctx, &ctx->style.button.border, 1);
+      nk_style_push_style_item(ctx, &ctx->style.button.normal, nk_style_item_color(col[k]));
+      nk_style_push_float(ctx, &ctx->style.button.border, 1);
 
-        int sel = filter_val & (1<<k);
-        if(sel) nk_style_push_float(ctx, &ctx->style.button.border, vkdt.wstate.fontsize*0.2);
-        if(sel) nk_style_push_float(ctx, &ctx->style.button.rounding, row_height/2);
-        else    nk_style_push_float(ctx, &ctx->style.button.rounding, 0);
-        dt_tooltip(k==0?"red":k==1?"green":k==2?"blue":k==3?"yellow":k==4?"purple":k==5?"video":"bracket");
-        if(nk_button_label(ctx, k==5 ? "m" : k==6 ? "[ ]" : " "))
-        {
-          filter_val ^= (1<<k);
-          vkdt.db.collection_filter_val = filter_val;
-          update_collection = 1;
-        }
-        nk_style_pop_float(ctx);
-        if(sel) nk_style_pop_float(ctx);
-        nk_style_pop_float(ctx);
-        nk_style_pop_style_item(ctx);
-      }
-    }
-    else if(filter_prop == s_prop_filetype)
-    {
-      static int32_t filter_module_idx = 0;
-      static const char *input_modules_str =
-          "raw : raw files\0"
-          "jpg : jpg images\0"
-          "exr : high dynamic range scene linear exr\0"
-          "vid : compressed video\0"
-          "mlv : magic lantern raw video\0"
-          "mcraw: motioncam raw video\0\0";
-      dt_token_t input_modules[] = {
-        dt_token("i-raw"),
-        dt_token("i-jpg"),
-        dt_token("i-exr"),
-        dt_token("i-vid"),
-        dt_token("i-mlv"),
-        dt_token("i-mcraw"),
-      };
-      dt_token_t filter_val = vkdt.db.collection_filter_val;
-      for(int k=0;k<NK_LEN(input_modules);k++) if(filter_val == input_modules[k]) { filter_module_idx = k; break; }
-      res = nk_combo_string(ctx, input_modules_str, filter_module_idx, 0xffff, row_height, size);
-      if(res != filter_module_idx)
+      int sel = ft->labels & (1<<k);
+      if(sel) nk_style_push_float(ctx, &ctx->style.button.border, vkdt.wstate.fontsize*0.2);
+      if(sel) nk_style_push_float(ctx, &ctx->style.button.rounding, row_height/2);
+      else    nk_style_push_float(ctx, &ctx->style.button.rounding, 0);
+      dt_tooltip(k==0?"red":k==1?"green":k==2?"blue":k==3?"yellow":k==4?"purple":k==5?"video":"bracket");
+      if(nk_button_label(ctx, k==5 ? "m" : k==6 ? "[ ]" : " "))
       {
-        filter_module_idx = res;
-        vkdt.db.collection_filter_val = input_modules[res];
+        ft->labels ^= (1<<k);
         update_collection = 1;
       }
-      nk_label(ctx, "file type", NK_TEXT_LEFT);
+      nk_style_pop_float(ctx);
+      if(sel) nk_style_pop_float(ctx);
+      nk_style_pop_float(ctx);
+      nk_style_pop_style_item(ctx);
     }
-    else if(filter_prop == s_prop_none)
-    { // hide filter value, it's meaningless
-    }
-    else if(filter_prop == s_prop_filename)   {} // TODO wire this in the db.c backend!
-    else if(filter_prop == s_prop_createdate)
+    if(!ft->labels) ft->active &= ~(1<<s_prop_labels);
+    else            ft->active |=   1<<s_prop_labels;
+
+
+    nk_layout_row(ctx, NK_STATIC, row_height, 2, ratio);
+    static int32_t filter_module_idx = 0;
+    static const char *input_modules_str =
+        "any\0"
+        "raw : raw files\0"
+        "jpg : jpg images\0"
+        "exr : high dynamic range scene linear exr\0"
+        "vid : compressed video\0"
+        "mlv : magic lantern raw video\0"
+        "mcraw: motioncam raw video\0\0";
+    dt_token_t input_modules[] = {
+      0,
+      dt_token("i-raw"),
+      dt_token("i-jpg"),
+      dt_token("i-exr"),
+      dt_token("i-vid"),
+      dt_token("i-mlv"),
+      dt_token("i-mcraw"),
+    };
+    dt_token_t filter_val = ft->filetype;
+    for(int k=0;k<NK_LEN(input_modules);k++) if(filter_val == input_modules[k]) { filter_module_idx = k; break; }
+    res = nk_combo_string(ctx, input_modules_str, filter_module_idx, 0xffff, row_height, size);
+    if(res != filter_module_idx)
     {
-      static dt_token_t typed_filter_val = 666;
-      if(typed_filter_val == 666) typed_filter_val = vkdt.db.collection_filter_val;
+      filter_module_idx = res;
+      ft->filetype = input_modules[res];
+      update_collection = 1;
+    }
+    nk_label(ctx, "filetype", NK_TEXT_LEFT);
+    if(!ft->filetype) ft->active &= ~(1<<s_prop_filetype);
+    else              ft->active |=   1<<s_prop_filetype;
+
+#if 0
+    nk_layout_row(ctx, NK_STATIC, row_height, 2, ratio);
+    int filename = (ft->active >> s_prop_filename)&1;
+    res = nk_combo_string(ctx, "any\0filter by\0\0", filename, 0xffff, row_height, size);
+    if(res != filename)
+    {
+      ft->active ^= 1<<s_prop_filename;
+      update_collection = 1;
+    }
+    nk_label(ctx, "filename", NK_TEXT_LEFT);
+    if(ft->active & (1<<s_prop_filename))
+    {
+      // TODO
+    }
+#endif
+    nk_layout_row(ctx, NK_STATIC, row_height, 2, ratio);
+    int createdate = (ft->active >> s_prop_createdate)&1;
+    res = nk_combo_string(ctx, "any\0filter by\0\0", createdate, 0xffff, row_height, size);
+    if(res != createdate)
+    {
+      ft->active ^= 1<<s_prop_createdate;
+      update_collection = 1;
+    }
+    nk_label(ctx, "createdate", NK_TEXT_LEFT);
+    if(ft->active & (1<<s_prop_createdate))
+    {
+      static char typed_filter_val[20] = "uninited";
+      if(!strcmp(typed_filter_val, "uninited")) snprintf(typed_filter_val, sizeof(typed_filter_val), "%s", ft->createdate);
       dt_tooltip("substring to match in the createdate\nin YYYY:MM:DD HH:MM:SS form");
-      nk_flags ret = nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD|NK_EDIT_SIG_ENTER, dt_token_str(typed_filter_val), 8, nk_filter_default);
+      nk_flags ret = nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD|NK_EDIT_SIG_ENTER, typed_filter_val, sizeof(typed_filter_val), nk_filter_default);
       if(ret & NK_EDIT_COMMITED)
       {
-        vkdt.db.collection_filter_val = typed_filter_val;
+        snprintf(ft->createdate, sizeof(ft->createdate), "%s", typed_filter_val);
         update_collection = 1;
       }
       static int cached_hash = 0;
       static int day_cnt = 0;
-      static dt_token_t day[31]; // okay if you have more than a month you should split it some other way first
+      static char day[31][11]; // okay if you have more than a month you should split it some other way first
       if(sort_prop == s_prop_createdate)
       {
         int hash = nk_murmur_hash(vkdt.db.dirname, (int)nk_strlen(vkdt.db.dirname), 0);
@@ -643,20 +757,28 @@ void render_lighttable_right_panel()
           dt_tooltip("create list of quick buttons for every day in current collection");
           if(nk_button_label(ctx, "by day"))
           {
+            // reset collection filter first, so we can query all images in this folder.
+            // we don't simply go through imageid because these aren't sorted by date
+            typed_filter_val[0] = ft->createdate[0] = 0;
+            uint64_t old_active = ft->active; // save
+            ft->active = 0;
+            dt_db_update_collection(&vkdt.db);
             day_cnt = 0;
             for(int i=0;i<vkdt.db.collection_cnt;i++)
             {
               if(day_cnt >= NK_LEN(day)) break;
               char createdate[20];
               dt_db_read_createdate(&vkdt.db, vkdt.db.collection[i], createdate);
-              if(!day_cnt || strncmp(createdate+4, dt_token_str(day[day_cnt-1]), 6))
+              if(!day_cnt || strncmp(createdate, day[day_cnt-1], 10))
               {
-                day[day_cnt] = 0;
-                strncpy(dt_token_str(day[day_cnt]), createdate+4, 6);
+                day[day_cnt][10] = 0;
+                strncpy(day[day_cnt], createdate, 10);
                 day_cnt++;
               }
             }
             cached_hash = hash;
+            ft->active = old_active; // restore
+            dt_db_update_collection(&vkdt.db);
           }
         }
         else
@@ -665,28 +787,16 @@ void render_lighttable_right_panel()
           nk_layout_row_dynamic(ctx, row_height, 7);
           for(int i=0;i<day_cnt;i++)
           {
-            dt_tooltip(dt_token_str(day[i])); // careful htis only works because we copy a max of 6<8 chars (so there'll always be 0 in the end)
-            if(nk_button_text(ctx, dt_token_str(day[i])+4, 2))
+            dt_tooltip(day[i]);
+            if(nk_button_text(ctx, day[i]+8, 2))
             {
-              typed_filter_val = day[i];
-              vkdt.db.collection_filter_val = typed_filter_val;
+              snprintf(typed_filter_val, sizeof(typed_filter_val), "%s", day[i]);
+              snprintf(ft->createdate, sizeof(ft->createdate), "%s", typed_filter_val);
               update_collection = 1;
             }
           }
         }
       }
-    }
-    else if(filter_prop == s_prop_rating)
-    {
-      nk_layout_row(ctx, NK_STATIC, row_height, 2, ratio);
-      int resi = filter_val;
-      nk_property_int(ctx, "#", 0, &resi, 5, 1, 1);
-      if(resi != filter_val) 
-      {
-        vkdt.db.collection_filter_val = filter_val = resi;
-        update_collection = 1;
-      }
-      nk_label(ctx, "filter value", NK_TEXT_LEFT);
     }
 
     nk_layout_row_dynamic(ctx, row_height, 1);
@@ -1059,7 +1169,7 @@ void render_lighttable_right_panel()
         float progress = threads_task_progress(job[k].taskid);
         nk_prog(ctx, 100*progress, 100, nk_false);
         char text[50];
-        snprintf(text, sizeof(text), "%g%%", 100.0*progress);
+        snprintf(text, sizeof(text), "%d%%", (int)(100.0*progress));
         nk_draw_text(nk_window_get_canvas(ctx), bb, text, strlen(text), &dt_gui_get_font(0)->handle, nk_rgba(0,0,0,0), nk_rgba(255,255,255,255));
         if(nk_button_label(ctx, "abort")) job[k].abort = 1;
         // technically a race condition on frame_cnt being inited by graph
@@ -1085,6 +1195,7 @@ void render_lighttable()
 {
   render_lighttable_right_panel();
   render_lighttable_center();
+  render_lighttable_header();
 
   // popup windows
   struct nk_rect bounds = { vkdt.state.center_x+0.2*vkdt.state.center_wd, vkdt.state.center_y+0.2*vkdt.state.center_ht,
